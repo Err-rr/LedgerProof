@@ -111,22 +111,12 @@ def pass1_bank_settlement(
         if utr:
             candidate_df = settlement_df[settlement_df["utr"].astype(str).str.upper() == utr.upper()]
         if candidate_df.empty:
-            amount = bank_row.get("amount_paisa")
+            amount = int(bank_row.get("amount_paisa", 0) or 0)
             bank_ts = _as_datetime(bank_row.get("posted_at"))
             amount_matches = settlement_df[settlement_df["amount_paisa"].astype(int) == int(amount)]
             if bank_ts is not None and not amount_matches.empty:
                 candidates = []
                 for _, settlement_row in amount_matches.iterrows():
-                    settlement_ts = _as_datetime(settlement_row.get("settled_at"))
-                    if settlement_ts is None:
-                        continue
-                    if abs((settlement_ts - bank_ts).days) <= date_window_days:
-                        candidates.append(settlement_row)
-                if candidates:
-                    candidate_df = pd.DataFrame(candidates)
-            elif bank_ts is not None:
-                candidates = []
-                for _, settlement_row in settlement_df.iterrows():
                     settlement_ts = _as_datetime(settlement_row.get("settled_at"))
                     if settlement_ts is None:
                         continue
@@ -171,7 +161,7 @@ def pass1_bank_settlement(
                 method=method,
                 confidence=confidence,
                 evidence=evidence,
-                matched_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                matched_at=datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%SZ"),
                 record_type="bank_credit",
                 left_id=str(bank_id),
                 right_id=str(settlement_id),

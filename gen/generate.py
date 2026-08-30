@@ -229,17 +229,27 @@ def write_excel_orders(orders: list[dict[str, Any]], out_path: Path) -> None:
 
     workbook.save(temp_path)
 
-    with zipfile.ZipFile(temp_path, "r") as source_zip, zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as target_zip:
-        for info in sorted(source_zip.infolist(), key=lambda item: item.filename):
-            data = source_zip.read(info.filename)
-            normalized = zipfile.ZipInfo(filename=info.filename, date_time=(1980, 1, 1, 0, 0, 0))
-            normalized.compress_type = info.compress_type
-            normalized.comment = info.comment
-            normalized.extra = info.extra
-            normalized.internal_attr = info.internal_attr
-            normalized.external_attr = info.external_attr
-            normalized.create_system = 3
-            target_zip.writestr(normalized, data)
+    with zipfile.ZipFile(temp_path, "r") as source_zip:
+        file_map = {info.filename: source_zip.read(info.filename) for info in source_zip.infolist()}
+
+    with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as target_zip:
+        for filename in sorted(file_map):
+            data = file_map[filename]
+            if filename == "docProps/core.xml":
+                text = data.decode("utf-8")
+                text = text.replace(
+                    "2026-01-01T00:00:00Z",
+                    "1980-01-01T00:00:00Z",
+                )
+                text = text.replace(
+                    "2026-01-01T00:00:00Z",
+                    "1980-01-01T00:00:00Z",
+                )
+                data = text.encode("utf-8")
+            entry = zipfile.ZipInfo(filename=filename, date_time=(1980, 1, 1, 0, 0, 0))
+            entry.compress_type = zipfile.ZIP_DEFLATED
+            entry.create_system = 3
+            target_zip.writestr(entry, data)
 
     temp_path.unlink(missing_ok=True)
 

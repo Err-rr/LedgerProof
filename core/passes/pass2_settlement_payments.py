@@ -100,7 +100,7 @@ def pass2_settlement_payments(
                     "fee_paisa": _val(payment_row, "fee_paisa", default=0),
                     "gst_paisa": _val(payment_row, "gst_paisa", "tax_paisa", default=0),
                 },
-                matched_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                matched_at=datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%SZ"),
                 record_type="payment",
                 left_id=payment_id,
                 right_id=str(settlement_id),
