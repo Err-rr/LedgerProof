@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+
+# Data directories
+# Keep sample data tracked, ignore the rest of the repo data folder.
+data/*
+!data/sample/
+!data/sample/**
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Test output
+.pytest_cache/
+.coverage
+htmlcov/

@@ -1,0 +1,1 @@
+"""LedgerProof package scaffold."""
