@@ -25,3 +25,6 @@ data/*
 .pytest_cache/
 .coverage
 htmlcov/
+
+# scripts/ci_check.py scratch venv
+.ci-check-venv/

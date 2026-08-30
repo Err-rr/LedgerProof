@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import random
+import re
 import tempfile
 import zipfile
 from collections import defaultdict
@@ -237,13 +238,18 @@ def write_excel_orders(orders: list[dict[str, Any]], out_path: Path) -> None:
             data = file_map[filename]
             if filename == "docProps/core.xml":
                 text = data.decode("utf-8")
-                text = text.replace(
-                    "2026-01-01T00:00:00Z",
-                    "1980-01-01T00:00:00Z",
+                # openpyxl stamps dcterms:modified with datetime.now() at save
+                # time regardless of workbook.properties.modified, so it must
+                # be neutralized by tag rather than by the literal value we set.
+                text = re.sub(
+                    r"(<dcterms:created[^>]*>)[^<]*(</dcterms:created>)",
+                    r"\g<1>1980-01-01T00:00:00Z\g<2>",
+                    text,
                 )
-                text = text.replace(
-                    "2026-01-01T00:00:00Z",
-                    "1980-01-01T00:00:00Z",
+                text = re.sub(
+                    r"(<dcterms:modified[^>]*>)[^<]*(</dcterms:modified>)",
+                    r"\g<1>1980-01-01T00:00:00Z\g<2>",
+                    text,
                 )
                 data = text.encode("utf-8")
             entry = zipfile.ZipInfo(filename=filename, date_time=(1980, 1, 1, 0, 0, 0))
