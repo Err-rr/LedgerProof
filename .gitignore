@@ -9,6 +9,7 @@ __pycache__/
 venv/
 .env
 .env.*
+!.env.example
 
 # Data directories
 # Keep sample data tracked, ignore the rest of the repo data folder.
