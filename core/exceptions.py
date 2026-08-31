@@ -27,6 +27,20 @@ SEVERITY_RANK = {
     "critical": 4,
 }
 
+# Single source of truth for "what counts as money at rest" -- both
+# ExceptionRecord.rupee_at_risk() and money_at_rest() key off this set, and
+# api/reconcile.py surfaces it verbatim as RunSummary.money_at_rest_codes so
+# the frontend can state honestly which codes a displayed total sums,
+# without duplicating this business rule and risking drift.
+MONEY_AT_REST_CODES = {
+    ExceptionCode.UNSETTLED_PAYMENT,
+    ExceptionCode.ORPHAN_ORDER,
+    ExceptionCode.DUPLICATE_REFUND,
+    ExceptionCode.UNMATCHED_BANK_CREDIT,
+    ExceptionCode.SETTLEMENT_IMBALANCE,
+    ExceptionCode.AMOUNT_VARIANCE_UNEXPLAINED,
+}
+
 
 @dataclass(frozen=True)
 class ExceptionRecord:
@@ -38,14 +52,7 @@ class ExceptionRecord:
     details: dict[str, Any] = field(default_factory=dict)
 
     def rupee_at_risk(self) -> int:
-        if self.code in {
-            ExceptionCode.UNSETTLED_PAYMENT,
-            ExceptionCode.ORPHAN_ORDER,
-            ExceptionCode.DUPLICATE_REFUND,
-            ExceptionCode.UNMATCHED_BANK_CREDIT,
-            ExceptionCode.SETTLEMENT_IMBALANCE,
-            ExceptionCode.AMOUNT_VARIANCE_UNEXPLAINED,
-        }:
+        if self.code in MONEY_AT_REST_CODES:
             return max(0, self.amount_paisa)
         return 0
 
@@ -86,11 +93,4 @@ def build_exception_queue(exceptions: list[dict[str, Any]]) -> list[ExceptionRec
 
 def money_at_rest(exceptions: list[dict[str, Any]]) -> int:
     queue = build_exception_queue(exceptions)
-    return sum(item.rupee_at_risk() for item in queue if item.code in {
-        ExceptionCode.UNSETTLED_PAYMENT,
-        ExceptionCode.ORPHAN_ORDER,
-        ExceptionCode.DUPLICATE_REFUND,
-        ExceptionCode.UNMATCHED_BANK_CREDIT,
-        ExceptionCode.SETTLEMENT_IMBALANCE,
-        ExceptionCode.AMOUNT_VARIANCE_UNEXPLAINED,
-    })
+    return sum(item.rupee_at_risk() for item in queue if item.code in MONEY_AT_REST_CODES)

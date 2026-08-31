@@ -17,10 +17,12 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from agent.resolve import resolve_exception as generate_resolution_proposal
+from api.config import get_settings
 from api.deps import get_repository
 from api.mappers import exception_row_to_out
 from api.repository import Repository
-from api.schemas import ResolveExceptionRequest, ResolveExceptionResponse
+from api.schemas import ProposalOut, ResolveExceptionRequest, ResolveExceptionResponse
 
 router = APIRouter(tags=["exceptions"])
 
@@ -55,3 +57,46 @@ def resolve_exception(
         raise HTTPException(status_code=404, detail=f"exception {exception_id} not found")
 
     return ResolveExceptionResponse(exception=exception_row_to_out(updated))
+
+
+@router.post("/exceptions/{exception_id}/propose", response_model=ProposalOut)
+def propose_resolution(
+    exception_id: str,
+    repository: Repository = Depends(get_repository),
+) -> ProposalOut:
+    """Generates a resolution proposal via the LLM surface CLAUDE.md permits
+    for exception explanation. Read-only: this never writes anything, and a
+    human still has to submit and approve a resolution via
+    POST /exceptions/{id}/resolve for it to count for anything."""
+    exception_row = repository.get_exception(exception_id)
+    if exception_row is None:
+        raise HTTPException(status_code=404, detail=f"exception {exception_id} not found")
+
+    related_records = repository.list_match_records_for_record(exception_row["run_id"], exception_row["record_id"])
+
+    anthropic_client = None
+    settings = get_settings()
+    if settings.anthropic_api_key:
+        import anthropic
+
+        anthropic_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+
+    try:
+        proposal = generate_resolution_proposal(exception_row, related_records, anthropic_client=anthropic_client)
+    except Exception:  # noqa: BLE001 - a flaky/malformed LLM response must degrade honestly, never 500
+        proposal = None
+
+    if proposal is None:
+        return ProposalOut(
+            hypothesis="No hypothesis formed.",
+            proposed_resolution="No automated resolution proposed; requires human review.",
+            confidence=0.0,
+            evidence_ids=[],
+        )
+
+    return ProposalOut(
+        hypothesis=proposal.hypothesis,
+        proposed_resolution=proposal.proposed_resolution,
+        confidence=proposal.confidence,
+        evidence_ids=proposal.evidence_ids,
+    )

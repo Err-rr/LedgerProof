@@ -68,3 +68,31 @@ def test_resolve_already_resolved_returns_409(client: TestClient, fake_repo: Fak
 
     second = client.post("/exceptions/exc-1/resolve", json=body)
     assert second.status_code == 409
+
+
+def test_propose_with_no_related_records_returns_no_hypothesis(client: TestClient, fake_repo: FakeRepository) -> None:
+    """No related match_records reach agent.resolve_exception -> it always
+    declines to guess (see agent/resolve.py), never fabricating a hypothesis."""
+    _seed_exception(fake_repo)
+
+    response = client.post("/exceptions/exc-1/propose")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["confidence"] == 0.0
+    assert "No hypothesis" in body["hypothesis"]
+    assert "human review" in body["proposed_resolution"]
+
+
+def test_propose_never_writes_to_the_exception(client: TestClient, fake_repo: FakeRepository) -> None:
+    _seed_exception(fake_repo)
+
+    client.post("/exceptions/exc-1/propose")
+
+    assert fake_repo.get_exception("exc-1")["status"] == "open"
+    assert fake_repo.get_exception("exc-1")["resolution"] is None
+
+
+def test_propose_unknown_exception_returns_404(client: TestClient) -> None:
+    response = client.post("/exceptions/does-not-exist/propose")
+    assert response.status_code == 404

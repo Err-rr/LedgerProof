@@ -84,6 +84,16 @@ class FakeRepository:
             "journal_lines": deepcopy(self.match_records.get(f"{run_id}:journal", []))[:journal_line_limit],
         }
 
+    def list_match_records(self, run_id: str) -> list[dict[str, Any]]:
+        return [deepcopy(r) for r in self.match_records.get(run_id, [])]
+
+    def list_match_records_for_record(self, run_id: str, record_id: str) -> list[dict[str, Any]]:
+        return [
+            deepcopy(r)
+            for r in self.match_records.get(run_id, [])
+            if r.get("left_id") == record_id or r.get("right_id") == record_id
+        ]
+
 
 class FakeStorage:
     def __init__(self) -> None:

@@ -1,0 +1,23 @@
+version: 1
+applications:
+  - appRoot: web
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - npm ci
+        build:
+          commands:
+            - npm run build
+      artifacts:
+        # Next.js App Router with server components/route handlers needs
+        # Amplify's SSR compute (Amplify detects the Next.js build output
+        # format automatically from .next/required-server-files.json) --
+        # this is not a static export.
+        baseDirectory: .next
+        files:
+          - "**/*"
+      cache:
+        paths:
+          - node_modules/**/*
+          - .next/cache/**/*

@@ -1,0 +1,42 @@
+/*
+ * LedgerProof design tokens. Every color, and the handful of dimensions
+ * components need to agree on, live here as CSS custom properties. No
+ * component should ever write an ad-hoc hex value -- if a component needs a
+ * color, it is one of these.
+ *
+ * Contrast note: --text-secondary on --surface measures ~6.8:1, just under
+ * the 7:1 bar this project holds table cells, rupee figures, and
+ * percentages to. Those three categories of content must always use
+ * --text-primary (~15.6:1 on --surface, ~17:1 on --bg) -- see
+ * components/data-text.tsx, which is the only place those values are
+ * rendered, precisely so this rule cannot be violated by accident.
+ */
+
+:root {
+  /* Color */
+  --bg: #0d0b09;
+  --surface: #1a1714;
+  --surface-raised: #232019;
+  --border: rgba(245, 239, 230, 0.1);
+  --border-strong: rgba(245, 239, 230, 0.18);
+  --text-primary: #f5efe6;
+  --text-secondary: #a89f92;
+  --text-muted: #6f675d;
+  --accent: #d9a05b;
+  --accent-dim: #8a6634;
+  --action: #f2eadf;
+  --action-text: #1a1714;
+  --sev-high: #e5675c;
+  --sev-medium: #d9a05b;
+  --sev-low: #6f675d;
+
+  /* Layout */
+  --content-max-width: 1200px;
+  --sidebar-width: 240px;
+  --radius-card: 12px;
+
+  /* Type scale */
+  --font-size-eyebrow: 11px;
+  --font-size-body: 15px;
+  --line-height-body: 1.6;
+}

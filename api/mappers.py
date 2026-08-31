@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from api.schemas import ExceptionOut, RunOut, RunStatus, RunSummary
+from api.schemas import ExceptionOut, MatchRecordOut, RunOut, RunStatus, RunSummary
 
 
 def run_row_to_out(row: dict[str, Any]) -> RunOut:
@@ -34,4 +34,18 @@ def exception_row_to_out(row: dict[str, Any]) -> ExceptionOut:
         resolution=row.get("resolution"),
         created_at=row["created_at"],
         resolved_at=row.get("resolved_at"),
+    )
+
+
+def match_record_row_to_out(row: dict[str, Any]) -> MatchRecordOut:
+    return MatchRecordOut(
+        id=row["id"],
+        pass_number=row["pass_number"],
+        method=row["method"],
+        confidence=row["confidence"],
+        evidence=row.get("evidence") or {},
+        matched_at=row["matched_at"],
+        record_type=row["record_type"],
+        left_id=row["left_id"],
+        right_id=row["right_id"],
     )

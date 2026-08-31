@@ -54,6 +54,10 @@ class Repository(Protocol):
 
     def get_ledger_bundle(self, run_id: str, *, exception_limit: int = 50, journal_line_limit: int = 200) -> dict[str, Any]: ...
 
+    def list_match_records_for_record(self, run_id: str, record_id: str) -> list[dict[str, Any]]: ...
+
+    def list_match_records(self, run_id: str) -> list[dict[str, Any]]: ...
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -272,4 +276,30 @@ class PostgresRepository:
             )
             journal_lines = list(cur.fetchall())
         return {"run": run, "exceptions": exceptions, "journal_lines": journal_lines}
+
+    def list_match_records_for_record(self, run_id: str, record_id: str) -> list[dict[str, Any]]:
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT id, pass_number, method, confidence, evidence, matched_at, record_type, left_id, right_id
+                FROM match_records
+                WHERE run_id = %s AND (left_id = %s OR right_id = %s)
+                ORDER BY pass_number
+                """,
+                (run_id, record_id, record_id),
+            )
+            return list(cur.fetchall())
+
+    def list_match_records(self, run_id: str) -> list[dict[str, Any]]:
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT id, pass_number, method, confidence, evidence, matched_at, record_type, left_id, right_id
+                FROM match_records
+                WHERE run_id = %s
+                ORDER BY pass_number, left_id
+                """,
+                (run_id,),
+            )
+            return list(cur.fetchall())
 

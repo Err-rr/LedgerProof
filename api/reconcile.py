@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 import uuid
 from collections import Counter
 from dataclasses import dataclass
@@ -19,12 +20,12 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from core.exceptions import build_exception_queue, money_at_rest
+from core.exceptions import MONEY_AT_REST_CODES, build_exception_queue, money_at_rest
 from core.passes.pass1_bank_settlement import pass1_bank_settlement
 from core.passes.pass2_settlement_payments import pass2_settlement_payments
 from core.passes.pass3_payment_order import pass3_payment_order
 from core.passes.pass4_journal import pass4_journal
-from api.schemas import RunSummary
+from api.schemas import RunSummary, StageResult
 
 
 @dataclass(frozen=True)
@@ -156,16 +157,36 @@ def _refund_totals_by_order(refunds_df: pd.DataFrame) -> dict[str, int]:
 
 
 def run_reconciliation(files: UploadedSourceFiles) -> ReconciliationResult:
+    """Runs pass1 -> pass4 synchronously (a single Lambda invocation, no
+    background worker), timing each stage with perf_counter. There is no
+    intermediate status a client could poll for mid-run -- the UI cannot
+    honestly show "pass 2 of 4 running" in real time. What it CAN show, once
+    this returns, is exactly what each pass actually did and how long it
+    took: real, measured numbers rather than a fabricated progress
+    animation. See RunSummary.stages and web/'s screen 01.
+    """
     now = datetime.now(timezone.utc)
     orders_df, payments_df, refunds_df, settlements_df, bank_df = load_frames(files)
 
+    stages: list[StageResult] = []
+
+    t0 = time.perf_counter()
     bank_matches, bank_exceptions = pass1_bank_settlement(bank_df, settlements_df)
+    t1 = time.perf_counter()
     settlement_matches, settlement_exceptions = pass2_settlement_payments(settlements_df, payments_df, refunds_df, None)
+    t2 = time.perf_counter()
     order_matches, order_exceptions = pass3_payment_order(payments_df, orders_df)
+    t3 = time.perf_counter()
 
     pass4_input = _build_pass4_input(order_matches, payments_df)
     refund_totals = _refund_totals_by_order(refunds_df)
     journal_lines = pass4_journal(pass4_input, orders_df, refund_amounts=refund_totals)
+    t4 = time.perf_counter()
+
+    stages.append(StageResult(pass_number=1, name="Bank credit ↔ settlement matching", matches=len(bank_matches), exceptions=len(bank_exceptions), duration_ms=(t1 - t0) * 1000))
+    stages.append(StageResult(pass_number=2, name="Settlement ↔ payment arithmetic", matches=len(settlement_matches), exceptions=len(settlement_exceptions), duration_ms=(t2 - t1) * 1000))
+    stages.append(StageResult(pass_number=3, name="Payment ↔ order matching", matches=len(order_matches), exceptions=len(order_exceptions), duration_ms=(t3 - t2) * 1000))
+    stages.append(StageResult(pass_number=4, name="Journal generation", matches=0, exceptions=0, duration_ms=(t4 - t3) * 1000))
 
     all_matches = bank_matches + settlement_matches + order_matches
     all_exceptions = bank_exceptions + settlement_exceptions + order_exceptions
@@ -186,6 +207,10 @@ def run_reconciliation(files: UploadedSourceFiles) -> ReconciliationResult:
     auto_resolve_rate = (total_matches / (total_matches + total_exceptions)) if (total_matches + total_exceptions) else 0.0
     exceptions_by_code = dict(Counter(row["code"] for row in exception_rows))
 
+    total_duration_ms = (t4 - t0) * 1000
+    total_input_records = len(orders_df) + len(payments_df) + len(settlements_df) + len(bank_df) + len(refunds_df)
+    throughput_rps = (total_input_records / (total_duration_ms / 1000)) if total_duration_ms > 0 else 0.0
+
     summary = RunSummary(
         total_orders=total_orders,
         total_matches=total_matches,
@@ -193,7 +218,11 @@ def run_reconciliation(files: UploadedSourceFiles) -> ReconciliationResult:
         match_rate=match_rate,
         auto_resolve_rate=auto_resolve_rate,
         money_at_rest_paisa=money_at_rest(all_exceptions),
+        money_at_rest_codes=sorted(code.value for code in MONEY_AT_REST_CODES),
         exceptions_by_code=exceptions_by_code,
+        stages=stages,
+        duration_ms=total_duration_ms,
+        throughput_rps=throughput_rps,
     )
 
     return ReconciliationResult(

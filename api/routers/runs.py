@@ -6,10 +6,10 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from api.deps import get_repository, get_storage
-from api.mappers import exception_row_to_out, run_row_to_out
+from api.mappers import exception_row_to_out, match_record_row_to_out, run_row_to_out
 from api.reconcile import ReconciliationResult, UploadedSourceFiles, run_reconciliation
 from api.repository import Repository
-from api.schemas import ExceptionOut, RunCreateResponse, RunOut, RunStatus
+from api.schemas import ExceptionOut, MatchRecordOut, RunCreateResponse, RunOut, RunStatus
 from api.storage import Storage
 
 router = APIRouter(tags=["runs"])
@@ -89,3 +89,15 @@ def list_run_exceptions(run_id: str, repository: Repository = Depends(get_reposi
         raise HTTPException(status_code=404, detail=f"run {run_id} not found")
     rows = repository.list_exceptions(run_id)  # repository sorts by rupee_at_risk_paisa desc
     return [exception_row_to_out(row) for row in rows]
+
+
+@router.get("/runs/{run_id}/match-records", response_model=list[MatchRecordOut])
+def list_match_records(run_id: str, repository: Repository = Depends(get_repository)) -> list[MatchRecordOut]:
+    """Not one of the five originally-specified endpoints -- added because
+    screen 04's provenance drill-down (order -> payment -> settlement ->
+    bank credit) needs to read match_records directly, and there was
+    previously no way to fetch them at all."""
+    if repository.get_run(run_id) is None:
+        raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+    rows = repository.list_match_records(run_id)
+    return [match_record_row_to_out(row) for row in rows]

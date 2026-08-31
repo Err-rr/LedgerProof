@@ -82,3 +82,24 @@ def test_list_exceptions_sorted_by_rupee_amount_descending(client: TestClient, f
     amounts = [r["rupee_at_risk_paisa"] for r in rows]
     assert amounts == sorted(amounts, reverse=True)
     assert rows[0]["id"] == "exc-large"
+
+
+def test_list_match_records_returns_404_for_unknown_run(client: TestClient) -> None:
+    response = client.get("/runs/does-not-exist/match-records")
+    assert response.status_code == 404
+
+
+def test_list_match_records_returns_real_pipeline_output(client: TestClient) -> None:
+    batch = build_upload_batch(seed=5, order_count=3)
+    run_id = client.post("/runs", files=as_multipart_files(batch)).json()["run_id"]
+
+    response = client.get(f"/runs/{run_id}/match-records")
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) > 0
+    pass_numbers = {row["pass_number"] for row in rows}
+    assert pass_numbers.issubset({1, 2, 3})
+    for row in rows:
+        assert row["confidence"] > 0
+        assert row["left_id"] and row["right_id"]
