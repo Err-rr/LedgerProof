@@ -401,11 +401,10 @@ def make_amount_pass1_mutation(name: str) -> Callable[[int], Case]:
         bank_row = scenario.bank_rows[idx]
         settlement = scenario.settlements[idx]
 
-        # Isolate the amount/date fallback path: this mutation targets amount
-        # handling specifically, not the (already-covered) UTR path, which
-        # doesn't cross-check amount at all -- see narration_false_confidence
-        # and the module docstring for that separate finding.
-        bank_row["narration"] = UTR_RE.sub("", bank_row["narration"]).strip()
+        # Run against the real primary path: the base scenario embeds a
+        # genuine UTR on this row, so this now exercises pass1's UTR path
+        # with FIX 4's amount cross-check in place (previously this stripped
+        # the UTR to dodge a bug where the UTR path ignored amount entirely).
         original = int(bank_row["amount_paisa"])
         mutated = mutate_fn(rng, original)
         bank_row["amount_paisa"] = mutated
@@ -417,6 +416,57 @@ def make_amount_pass1_mutation(name: str) -> Callable[[int], Case]:
         )
 
     return _fn
+
+
+def mut_amount_utr_verified_amount_mismatch(seed: int) -> Case:
+    """FIX 4 coverage: a bank credit whose UTR matches a settlement exactly,
+    but whose amount does not. Before the fix this was silently accepted at
+    confidence=1.0 via the UTR path (which never cross-checked amount). The
+    correct behavior is to never accept it: route to
+    AMOUNT_VARIANCE_UNEXPLAINED and produce no confident match at all.
+    """
+    scenario = build_scenario(seed)
+    rng = random.Random(seed + 7919)
+    idx = scenario.target_index
+    bank_row = scenario.bank_rows[idx]
+    settlement = scenario.settlements[idx]
+
+    # The UTR embedded by build_scenario is left completely untouched here --
+    # this exercises the real primary (UTR) path, not the fallback.
+    original = int(bank_row["amount_paisa"])
+    mutated = _drift_paisa(rng, original, max_drift=5000)
+    bank_row["amount_paisa"] = mutated
+
+    bank_df = pd.DataFrame(scenario.bank_rows)
+    settlement_df = pd.DataFrame(scenario.settlements)
+    result, error = _safe_run(pass1_bank_settlement, bank_df, settlement_df)
+    repro = {
+        "bank_credit_id": bank_row["bank_credit_id"],
+        "settlement_id": settlement["settlement_id"],
+        "true_utr": settlement["utr"],
+        "original_amount_paisa": original,
+        "mutated_amount_paisa": mutated,
+    }
+    if error:
+        return _crash("amount", "utr_verified_amount_mismatch", seed, "pass1", error, repro)
+    matches, exceptions = result
+    match = next((m for m in matches if m.left_id == bank_row["bank_credit_id"]), None)
+    exc = next((e for e in exceptions if e.get("record_id") == bank_row["bank_credit_id"]), None)
+
+    if match is not None:
+        verdict = WRONG_MATCH
+        detail = f"UTR matched but amount did not (drift={mutated - original} paisa); still produced a confident match (method={match.method}, confidence={match.confidence})"
+    elif exc is not None and exc["code"] == "AMOUNT_VARIANCE_UNEXPLAINED":
+        verdict, detail = CONTAINED, f"UTR-verified amount mismatch correctly routed to {exc['code']} instead of being silently accepted"
+    elif exc is not None:
+        verdict, detail = CONTAINED, f"routed to {exc['code']}"
+    else:
+        verdict, detail = WRONG_MATCH, "silent drop: UTR matched, amount did not, but neither a match nor an exception was recorded"
+
+    if match is not None:
+        repro["result_method"] = match.method
+        repro["result_confidence"] = match.confidence
+    return Case(family="amount", mutation="utr_verified_amount_mismatch", seed=seed, target_pass="pass1", verdict=verdict, detail=detail, reproduction=repro)
 
 
 def make_amount_pass2_mutation(name: str) -> Callable[[int], Case]:
@@ -718,6 +768,7 @@ MUTATIONS: list[tuple[str, str, Callable[[int], Case]]] = [
     ("amount", "sign_flip_payment_net", make_amount_pass2_mutation("sign_flip")),
     ("amount", "off_by_one_rupee_bank_credit", make_amount_pass1_mutation("off_by_one_rupee")),
     ("amount", "off_by_one_rupee_payment_net", make_amount_pass2_mutation("off_by_one_rupee")),
+    ("amount", "utr_verified_amount_mismatch", mut_amount_utr_verified_amount_mismatch),
     ("timing", "period_boundary_shift", mut_timing_period_boundary_shift),
     ("timing", "out_of_order_delivery", mut_timing_out_of_order_delivery),
     ("timing", "backdate_bank_line", mut_timing_backdate_bank_line),

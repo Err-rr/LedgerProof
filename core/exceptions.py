@@ -17,6 +17,7 @@ class ExceptionCode(str, Enum):
     AMOUNT_VARIANCE_REFUND = "AMOUNT_VARIANCE_REFUND"
     AMOUNT_VARIANCE_ADJUSTMENT = "AMOUNT_VARIANCE_ADJUSTMENT"
     AMOUNT_VARIANCE_SETTLEMENT = "AMOUNT_VARIANCE_SETTLEMENT"
+    AMOUNT_VARIANCE_UNEXPLAINED = "AMOUNT_VARIANCE_UNEXPLAINED"
 
 
 SEVERITY_RANK = {
@@ -37,7 +38,14 @@ class ExceptionRecord:
     details: dict[str, Any] = field(default_factory=dict)
 
     def rupee_at_risk(self) -> int:
-        if self.code in {ExceptionCode.UNSETTLED_PAYMENT, ExceptionCode.ORPHAN_ORDER, ExceptionCode.DUPLICATE_REFUND, ExceptionCode.UNMATCHED_BANK_CREDIT}:
+        if self.code in {
+            ExceptionCode.UNSETTLED_PAYMENT,
+            ExceptionCode.ORPHAN_ORDER,
+            ExceptionCode.DUPLICATE_REFUND,
+            ExceptionCode.UNMATCHED_BANK_CREDIT,
+            ExceptionCode.SETTLEMENT_IMBALANCE,
+            ExceptionCode.AMOUNT_VARIANCE_UNEXPLAINED,
+        }:
             return max(0, self.amount_paisa)
         return 0
 
@@ -59,6 +67,7 @@ def build_exception_queue(exceptions: list[dict[str, Any]]) -> list[ExceptionRec
             ExceptionCode.AMOUNT_VARIANCE_REFUND: "medium",
             ExceptionCode.AMOUNT_VARIANCE_ADJUSTMENT: "medium",
             ExceptionCode.AMOUNT_VARIANCE_SETTLEMENT: "medium",
+            ExceptionCode.AMOUNT_VARIANCE_UNEXPLAINED: "critical",
         }[code]
         record_type = item.get("record_type", "unknown")
         record_id = str(item.get("record_id", "unknown"))
@@ -82,4 +91,6 @@ def money_at_rest(exceptions: list[dict[str, Any]]) -> int:
         ExceptionCode.ORPHAN_ORDER,
         ExceptionCode.DUPLICATE_REFUND,
         ExceptionCode.UNMATCHED_BANK_CREDIT,
+        ExceptionCode.SETTLEMENT_IMBALANCE,
+        ExceptionCode.AMOUNT_VARIANCE_UNEXPLAINED,
     })

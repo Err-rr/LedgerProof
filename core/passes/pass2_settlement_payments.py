@@ -66,7 +66,7 @@ def pass2_settlement_payments(
     matches: list[MatchRecord] = []
     exceptions: list[dict[str, Any]] = []
 
-    if settlements_df.empty:
+    if settlements_df.empty and payments_df.empty:
         return matches, exceptions
 
     refund_df = refunds_df.copy() if refunds_df is not None else pd.DataFrame(columns=["refund_id", "payment_id", "order_id", "amount_paisa"])
@@ -111,9 +111,11 @@ def pass2_settlement_payments(
         settlement_id = str(settlement_row.get("settlement_id", "settlement-row"))
         settlement_amount = _val(settlement_row, "amount_paisa", "net_amount_paisa", "gross_amount_paisa", default=0)
 
-        settlement_payments = payments_df[payments_df["settlement_id"].astype(str) == settlement_id] if "settlement_id" in payments_df.columns else pd.DataFrame()
-        if settlement_payments.empty:
-            continue
+        settlement_payments = payments_df[payments_df["settlement_id"].astype(str) == settlement_id] if "settlement_id" in payments_df.columns else pd.DataFrame(columns=["payment_id"])
+        # A settlement with zero attached payments is not a no-op: it is a
+        # maximal imbalance (the full settlement amount is unaccounted for),
+        # so it must fall through to the SETTLEMENT_IMBALANCE check below
+        # rather than being silently skipped.
 
         payment_net_total = 0
         for _, payment_row in settlement_payments.iterrows():
@@ -153,6 +155,7 @@ def pass2_settlement_payments(
                     expected_total_paisa=expected_total,
                     delta_paisa=delta,
                     variance_code=variance_code,
+                    amount_paisa=settlement_amount,
                 )
             )
 
