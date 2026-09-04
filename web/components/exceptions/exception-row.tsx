@@ -5,7 +5,8 @@ import { useEffect, useState } from "react";
 import { SeverityBadge } from "@/components/severity-badge";
 import { Money } from "@/components/data-text";
 import { formatDateTime, formatPercent, humanizeCode } from "@/lib/format";
-import type { ExceptionOut, ProposalOut } from "@/lib/api-types";
+import { FetchFailure, fetchJson } from "@/lib/safe-fetch";
+import type { ExceptionOut, ProposalOut, ResolveExceptionResponse } from "@/lib/api-types";
 
 type ProposalState =
   | { status: "idle" }
@@ -40,14 +41,17 @@ export function ExceptionRow({ exception, expanded, onToggle, reviewerName, onRe
     if (!expanded || exception.status !== "open" || proposalState.status !== "idle") return;
     let cancelled = false;
     setProposalState({ status: "loading" });
-    fetch(`/api/exceptions/${exception.id}/propose`, { method: "POST" })
-      .then(async (res) => {
-        const body = await res.json();
-        if (!res.ok) throw new Error(body.detail ?? "failed to generate a proposal");
-        if (!cancelled) setProposalState({ status: "loaded", proposal: body as ProposalOut });
+    fetchJson<ProposalOut>(`/api/exceptions/${exception.id}/propose`, { method: "POST" })
+      .then((proposal) => {
+        if (!cancelled) setProposalState({ status: "loaded", proposal });
       })
       .catch((err) => {
-        if (!cancelled) setProposalState({ status: "error", message: err instanceof Error ? err.message : "unknown error" });
+        if (!cancelled) {
+          setProposalState({
+            status: "error",
+            message: err instanceof FetchFailure ? err.message : err instanceof Error ? err.message : "unknown error generating a proposal",
+          });
+        }
       });
     return () => {
       cancelled = true;
@@ -70,19 +74,18 @@ export function ExceptionRow({ exception, expanded, onToggle, reviewerName, onRe
           };
 
     try {
-      const res = await fetch(`/api/exceptions/${exception.id}/resolve`, {
+      await fetchJson<ResolveExceptionResponse>(`/api/exceptions/${exception.id}/resolve`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      const responseBody = await res.json();
-      if (!res.ok) {
-        setActionState({ status: "error", message: responseBody.detail ?? `request failed with status ${res.status}` });
-        return;
-      }
+      setActionState({ status: "idle" });
       onResolved();
     } catch (err) {
-      setActionState({ status: "error", message: err instanceof Error ? err.message : "network error contacting the API" });
+      setActionState({
+        status: "error",
+        message: err instanceof FetchFailure ? err.message : err instanceof Error ? err.message : "unknown error submitting the resolution",
+      });
     }
   }
 

@@ -6,6 +6,7 @@ import { ExceptionRow } from "@/components/exceptions/exception-row";
 import { Filters } from "@/components/exceptions/filters";
 import { Count } from "@/components/data-text";
 import { useReviewerName } from "@/lib/use-reviewer-name";
+import { FetchFailure, fetchJson } from "@/lib/safe-fetch";
 import type { ExceptionOut } from "@/lib/api-types";
 
 function uniqueInOrder(values: string[]): string[] {
@@ -31,13 +32,11 @@ export function ExceptionsTable({ runId, initialExceptions }: { runId: string; i
 
   async function refresh() {
     try {
-      const res = await fetch(`/api/runs/${runId}/exceptions`, { cache: "no-store" });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.detail ?? "failed to refresh the exception queue");
-      setExceptions(body as ExceptionOut[]);
+      const body = await fetchJson<ExceptionOut[]>(`/api/runs/${runId}/exceptions`, { cache: "no-store" });
+      setExceptions(body);
       setRefreshError(null);
     } catch (err) {
-      setRefreshError(err instanceof Error ? err.message : "failed to refresh the exception queue");
+      setRefreshError(err instanceof FetchFailure ? err.message : err instanceof Error ? err.message : "failed to refresh the exception queue");
     }
   }
 

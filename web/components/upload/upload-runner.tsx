@@ -7,7 +7,8 @@ import { DropZone } from "@/components/upload/drop-zone";
 import { PipelineStatus } from "@/components/upload/pipeline-status";
 import { previewFile, type FileKind, type FilePreview } from "@/lib/file-preview";
 import { pollRun } from "@/lib/poll-run";
-import type { ApiErrorBody, RunCreateResponse } from "@/lib/api-types";
+import { FetchFailure, fetchJson } from "@/lib/safe-fetch";
+import type { RunCreateResponse } from "@/lib/api-types";
 
 interface FieldMeta {
   kind: FileKind;
@@ -75,21 +76,18 @@ export function UploadRunner() {
     }
 
     try {
-      const createRes = await fetch("/api/runs", { method: "POST", body: formData });
-      const createBody = (await createRes.json()) as RunCreateResponse | ApiErrorBody;
-      if (!createRes.ok) {
-        setPhase({ status: "request_failed", message: "detail" in createBody ? createBody.detail : "failed to start the run" });
-        return;
-      }
+      const createBody = await fetchJson<RunCreateResponse>("/api/runs", { method: "POST", body: formData });
 
-      const run = await pollRun((createBody as RunCreateResponse).run_id);
+      const run = await pollRun(createBody.run_id);
       if (run.status === "failed") {
         setPhase({ status: "run_failed", message: run.error ?? "the reconciliation run failed for an unknown reason" });
         return;
       }
       router.push(`/runs/${run.run_id}`);
     } catch (err) {
-      setPhase({ status: "request_failed", message: err instanceof Error ? err.message : "network error contacting the API" });
+      // A FetchFailure already carries a readable message for both causes
+      // (network failure vs. an HTTP error response) -- see lib/safe-fetch.ts.
+      setPhase({ status: "request_failed", message: err instanceof FetchFailure ? err.message : err instanceof Error ? err.message : "unknown error starting the run" });
     }
   }
 

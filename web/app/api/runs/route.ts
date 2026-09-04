@@ -8,7 +8,16 @@ import { createRun } from "@/lib/api-client";
  * actual URL is never exposed in the browser and CORS is never a concern.
  */
 export async function POST(request: NextRequest) {
-  const formData = await request.formData();
+  let formData: FormData;
+  try {
+    formData = await request.formData();
+  } catch (err) {
+    return NextResponse.json(
+      { detail: err instanceof Error ? `could not read the uploaded files: ${err.message}` : "could not read the uploaded files" },
+      { status: 400 },
+    );
+  }
+
   const { status, body } = await createRun(formData);
-  return NextResponse.json(body, { status });
+  return NextResponse.json(body as object, { status });
 }

@@ -1,4 +1,5 @@
-import type { ApiErrorBody, RunOut } from "./api-types";
+import { fetchJson } from "./safe-fetch";
+import type { RunOut } from "./api-types";
 
 /**
  * POST /runs (via our own /api/runs proxy) already runs the reconciliation
@@ -11,12 +12,7 @@ import type { ApiErrorBody, RunOut } from "./api-types";
 export async function pollRun(runId: string, { timeoutMs = 60_000, intervalMs = 1200 } = {}): Promise<RunOut> {
   const start = Date.now();
   for (;;) {
-    const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`, { cache: "no-store" });
-    const body = (await res.json()) as RunOut | ApiErrorBody;
-    if (!res.ok) {
-      throw new Error("detail" in body ? body.detail : "failed to check run status");
-    }
-    const run = body as RunOut;
+    const run = await fetchJson<RunOut>(`/api/runs/${encodeURIComponent(runId)}`, { cache: "no-store" });
     if (run.status === "completed" || run.status === "failed") {
       return run;
     }
