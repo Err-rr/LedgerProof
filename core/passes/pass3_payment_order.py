@@ -43,15 +43,74 @@ def _build_exception(code: str, record_type: str, record_id: str, **details: Any
 def _as_dt(value: Any) -> datetime | None:
     if pd.isna(value):
         return None
-    if isinstance(value, str):
-        try:
-            return pd.to_datetime(value).to_pydatetime()
-        except Exception:
-            return None
     try:
         return pd.to_datetime(value).to_pydatetime()
     except Exception:
         return None
+
+
+def _payment_timestamp(payment: pd.Series) -> datetime | None:
+    """Real Razorpay payment objects report their capture time as
+    captured_at, not created_at (created_at, where present, is order-side
+    vocabulary) -- check both rather than assuming one name."""
+    return _as_dt(payment.get("created_at")) or _as_dt(payment.get("captured_at"))
+
+
+def _tier1_order_id(payment: pd.Series, orders_by_id: dict[str, pd.Series]) -> str | None:
+    if "order_id" in payment.index and pd.notna(payment.get("order_id")) and str(payment["order_id"]) in orders_by_id:
+        return str(payment["order_id"])
+    return None
+
+
+def _tier2_receipt(payment: pd.Series, orders_by_id: dict[str, pd.Series]) -> str | None:
+    """Matches the payment's receipt against the ORDER's own receipt field.
+    (Not "reference" -- no such column exists on a Razorpay order or in this
+    project's order schema; "receipt" is the real, populated field on both
+    sides, and was already being read correctly off the payment. This was
+    the actual bug: the order side of the comparison looked for a field name
+    that never existed, so Tier 2 could never succeed for anyone.)
+    """
+    if "receipt" not in payment.index or pd.isna(payment.get("receipt")):
+        return None
+    receipt = str(payment["receipt"])
+    for order_id_value, order_row in orders_by_id.items():
+        if "receipt" in order_row.index and pd.notna(order_row.get("receipt")) and str(order_row["receipt"]) == receipt:
+            return order_id_value
+    return None
+
+
+def _tier3_fuzzy_candidates(payment: pd.Series, orders_by_id: dict[str, pd.Series]) -> list[str]:
+    """Amount + time window, narrowed by contact match only when the
+    payment actually carries contact fields. Real Razorpay payment objects
+    do not carry customer_email/customer_phone at all (only orders do) --
+    requiring them unconditionally made this tier permanently unreachable
+    for real data. When a payment has neither field, amount+time alone (an
+    exact amount match within a tight 10-minute window) is the evidence;
+    when it does have one, it is still required, preserving the stricter
+    behavior for data that supports it.
+    """
+    amount = int(payment.get("amount_paisa", 0) or 0)
+    paid_at = _payment_timestamp(payment)
+    has_email = "customer_email" in payment.index and pd.notna(payment.get("customer_email"))
+    has_phone = "customer_phone" in payment.index and pd.notna(payment.get("customer_phone"))
+    requires_contact = has_email or has_phone
+
+    candidates: list[str] = []
+    for order_id_value, order_row in orders_by_id.items():
+        if int(order_row.get("amount_paisa", 0) or 0) != amount:
+            continue
+        order_time = _as_dt(order_row.get("created_at"))
+        if paid_at is None or order_time is None:
+            continue
+        if abs((paid_at - order_time).total_seconds()) > 600:
+            continue
+        if requires_contact:
+            email_match = has_email and "email" in order_row.index and str(payment.get("customer_email", "")).lower() == str(order_row.get("email", "")).lower()
+            phone_match = has_phone and "phone" in order_row.index and str(payment.get("customer_phone", "")).replace(" ", "") == str(order_row.get("phone", "")).replace(" ", "")
+            if not (email_match or phone_match):
+                continue
+        candidates.append(order_id_value)
+    return candidates
 
 
 def pass3_payment_order(
@@ -60,11 +119,18 @@ def pass3_payment_order(
     *,
     pass_number: int = 3,
 ) -> tuple[list[MatchRecord], list[dict[str, Any]]]:
-    """Link payments to orders using a three-tier matching strategy."""
+    """Link payments to orders using a three-tier matching strategy.
+
+    Tiers cascade -- each is only attempted if the previous one failed to
+    produce a candidate, not merely because an earlier tier's identifying
+    field happened to be present on the payment (that was a bug: any payment
+    carrying a receipt used to skip Tier 3 by construction, even when the
+    receipt didn't resolve to any order).
+    """
     matches: list[MatchRecord] = []
     exceptions: list[dict[str, Any]] = []
 
-    if payments_df.empty or orders_df.empty:
+    if payments_df.empty and orders_df.empty:
         return matches, exceptions
 
     orders_by_id = {str(row["order_id"]): row for _, row in orders_df.iterrows()}
@@ -73,56 +139,48 @@ def pass3_payment_order(
     for _, payment in payments_df.iterrows():
         payment_id = str(payment.get("payment_id", "payment-row"))
         payment_notes = str(payment.get("notes", "") or "")
-        order_id = None
 
-        if "order_id" in payment.index and pd.notna(payment.get("order_id")):
-            order_id = str(payment["order_id"])
-        if not order_id:
-            if "order_reference" in payment.index and pd.notna(payment.get("order_reference")):
-                order_id = str(payment["order_reference"])
+        tier: int | None = None
+        candidate: str | None = None
 
-        tier = None
-        candidate = None
-
-        if "order_id" in payment.index and pd.notna(payment.get("order_id")) and str(payment["order_id"]) in orders_by_id:
-            candidate = str(payment["order_id"])
+        candidate = _tier1_order_id(payment, orders_by_id)
+        if candidate is not None:
             tier = 1
-        elif "receipt" in payment.index and pd.notna(payment.get("receipt")):
-            receipt = str(payment["receipt"])
-            for order_id_value, order_row in orders_by_id.items():
-                if "reference" in order_row and str(order_row["reference"]) == receipt:
-                    candidate = order_id_value
-                    tier = 2
-                    break
-        else:
-            amount = int(payment.get("amount_paisa", 0) or 0)
-            paid_at = _as_dt(payment.get("created_at"))
-            candidates = []
-            for order_id_value, order_row in orders_by_id.items():
-                order_amount = int(order_row.get("amount_paisa", 0) or 0)
-                if order_amount != amount:
-                    continue
-                order_time = _as_dt(order_row.get("created_at"))
-                if paid_at is not None and order_time is not None:
-                    if abs((paid_at - order_time).total_seconds()) <= 600:
-                        email_match = False
-                        phone_match = False
-                        if "customer_email" in payment.index and "email" in order_row.index:
-                            email_match = str(payment.get("customer_email", "")).lower() == str(order_row.get("email", "")).lower()
-                        if "customer_phone" in payment.index and "phone" in order_row.index:
-                            phone_match = str(payment.get("customer_phone", "")).replace(" ", "") == str(order_row.get("phone", "")).replace(" ", "")
-                        if email_match or phone_match:
-                            candidates.append(order_id_value)
-            if len(candidates) == 1:
-                candidate = candidates[0]
+
+        if candidate is None:
+            candidate = _tier2_receipt(payment, orders_by_id)
+            if candidate is not None:
+                tier = 2
+
+        if candidate is None:
+            fuzzy_candidates = _tier3_fuzzy_candidates(payment, orders_by_id)
+            if len(fuzzy_candidates) == 1:
+                candidate = fuzzy_candidates[0]
                 tier = 3
-            elif len(candidates) > 1:
-                exceptions.append(_build_exception("AMBIGUOUS_MATCH", "payment", payment_id, candidates=candidates, tier=3, amount_paisa=amount))
+            elif len(fuzzy_candidates) > 1:
+                exceptions.append(
+                    _build_exception(
+                        "AMBIGUOUS_MATCH", "payment", payment_id,
+                        candidates=fuzzy_candidates, tier=3, amount_paisa=int(payment.get("amount_paisa", 0) or 0),
+                    )
+                )
                 continue
 
         if candidate is None:
-            if str(payment.get("status", "")).lower() == "paid":
-                exceptions.append(_build_exception("ORPHAN_ORDER", "order", str(payment.get("order_id", payment_id)), payment_id=payment_id))
+            # A payment that never resolves to an order must never vanish
+            # silently. "paid" is order-status vocabulary and never appears
+            # as a payment's own status, so checking for it here (as the
+            # original code did) meant this branch could never fire for a
+            # real captured/authorized payment -- it silently dropped
+            # exactly the records that most needed flagging.
+            status = str(payment.get("status", "")).lower()
+            if status in {"captured", "authorized", "paid"}:
+                exceptions.append(
+                    _build_exception(
+                        "UNMATCHED_PAYMENT", "payment", payment_id,
+                        amount_paisa=int(payment.get("amount_paisa", 0) or 0), status=status,
+                    )
+                )
             continue
 
         order_payment_counts[candidate] = order_payment_counts.get(candidate, 0) + 1

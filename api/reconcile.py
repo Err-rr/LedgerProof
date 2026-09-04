@@ -156,6 +156,19 @@ def _refund_totals_by_order(refunds_df: pd.DataFrame) -> dict[str, int]:
     return {str(order_id): int(amount) for order_id, amount in totals.items()}
 
 
+def _unsettled_order_ids(settlement_exceptions: list[dict], payment_order_matches: list) -> set[str]:
+    """Orders whose matched payment pass2 flagged UNSETTLED_PAYMENT (no
+    settlement on file for it) -- captured money that has not been confirmed
+    to have reached the bank. pass4_journal uses this to debit "Settlement
+    Receivable" instead of "Bank" for those orders; see pass4_journal's
+    docstring and audit/FINDINGS.md.
+    """
+    unsettled_payment_ids = {e["record_id"] for e in settlement_exceptions if e["code"] == "UNSETTLED_PAYMENT"}
+    if not unsettled_payment_ids:
+        return set()
+    return {m.right_id for m in payment_order_matches if m.left_id in unsettled_payment_ids}
+
+
 def run_reconciliation(files: UploadedSourceFiles) -> ReconciliationResult:
     """Runs pass1 -> pass4 synchronously (a single Lambda invocation, no
     background worker), timing each stage with perf_counter. There is no
@@ -180,7 +193,8 @@ def run_reconciliation(files: UploadedSourceFiles) -> ReconciliationResult:
 
     pass4_input = _build_pass4_input(order_matches, payments_df)
     refund_totals = _refund_totals_by_order(refunds_df)
-    journal_lines = pass4_journal(pass4_input, orders_df, refund_amounts=refund_totals)
+    unsettled_order_ids = _unsettled_order_ids(settlement_exceptions, order_matches)
+    journal_lines = pass4_journal(pass4_input, orders_df, refund_amounts=refund_totals, unsettled_order_ids=unsettled_order_ids)
     t4 = time.perf_counter()
 
     stages.append(StageResult(pass_number=1, name="Bank credit ↔ settlement matching", matches=len(bank_matches), exceptions=len(bank_exceptions), duration_ms=(t1 - t0) * 1000))

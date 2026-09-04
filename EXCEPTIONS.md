@@ -17,4 +17,11 @@ The reconciliation layer emits deterministic exception codes that are stable acr
 - `AMOUNT_VARIANCE_ADJUSTMENT` — the variance is driven by adjustments.
 - `AMOUNT_VARIANCE_SETTLEMENT` — the variance is driven by the settlement amount itself.
 
+## Payment-to-order matching
+
+- `UNMATCHED_PAYMENT` — a captured/authorized payment could not be linked to any order by any tier (exact order reference, receipt, or amount+time fallback), and the ambiguity/candidate-count checks did not apply. This payment's money is unaccounted for on the order side; it must never be silently dropped.
+- `ORPHAN_ORDER` — an order is marked paid but no payment was matched to it.
+- `AMBIGUOUS_MATCH` — (also emitted here) a payment's fallback amount+time match resolves to more than one order candidate.
+- `DUPLICATE_PAYMENT_CANDIDATE` — more than one payment resolved to the same order.
+
 All amounts remain integer paisa values.

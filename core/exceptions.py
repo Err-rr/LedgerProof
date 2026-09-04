@@ -10,6 +10,7 @@ class ExceptionCode(str, Enum):
     AMBIGUOUS_MATCH = "AMBIGUOUS_MATCH"
     SETTLEMENT_IMBALANCE = "SETTLEMENT_IMBALANCE"
     UNSETTLED_PAYMENT = "UNSETTLED_PAYMENT"
+    UNMATCHED_PAYMENT = "UNMATCHED_PAYMENT"
     ORPHAN_ORDER = "ORPHAN_ORDER"
     DUPLICATE_REFUND = "DUPLICATE_REFUND"
     DUPLICATE_PAYMENT_CANDIDATE = "DUPLICATE_PAYMENT_CANDIDATE"
@@ -34,6 +35,7 @@ SEVERITY_RANK = {
 # without duplicating this business rule and risking drift.
 MONEY_AT_REST_CODES = {
     ExceptionCode.UNSETTLED_PAYMENT,
+    ExceptionCode.UNMATCHED_PAYMENT,
     ExceptionCode.ORPHAN_ORDER,
     ExceptionCode.DUPLICATE_REFUND,
     ExceptionCode.UNMATCHED_BANK_CREDIT,
@@ -67,6 +69,7 @@ def build_exception_queue(exceptions: list[dict[str, Any]]) -> list[ExceptionRec
             ExceptionCode.AMBIGUOUS_MATCH: "medium",
             ExceptionCode.SETTLEMENT_IMBALANCE: "critical",
             ExceptionCode.UNSETTLED_PAYMENT: "high",
+            ExceptionCode.UNMATCHED_PAYMENT: "high",
             ExceptionCode.ORPHAN_ORDER: "high",
             ExceptionCode.DUPLICATE_REFUND: "medium",
             ExceptionCode.DUPLICATE_PAYMENT_CANDIDATE: "medium",

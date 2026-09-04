@@ -1,4 +1,12 @@
-# Phase 6 Adversarial Audit — Findings & Fixes
+# Findings & Fixes
+
+Launch-blocking bugs found in the matching engine and journal generation,
+across two separate exercises: an adversarial mutation audit (Phase 6) and
+the first real, non-synthetic upload (Phase 8). Both are recorded here so
+the full history of what broke, why, and how it was verified fixed stays in
+one place.
+
+## Phase 6 — Adversarial Mutation Audit
 
 `audit/mutate.py` ran 315 mutations across four families (narration, amount,
 timing, structural) against the real `pass1_bank_settlement` and
@@ -251,3 +259,170 @@ output (verified across independent runs before and after the fixes).
 No mutation was removed, weakened, or reclassified to reach this number: the
 same 20 original mutation types still run at the same 15 trials each, plus
 one new mutation type added specifically to close the bug-4 coverage gap.
+
+---
+
+# Phase 8 — Bugs found by a real upload (not synthetic data)
+
+The first real (non-`gen.generate`) upload — a 12-order batch with realistic
+Razorpay-shaped records (`pay_LP0003`, `order_LP0012`, etc.) — failed
+immediately on `pass4_journal`'s own balance assertion:
+
+```
+Journal imbalance detected: debit=3739000, credit=3928800
+```
+
+That assertion is correct behavior per CLAUDE.md rule 7 and was not touched.
+The imbalance decoded exactly: `credit` (3928800) is the gross sum of all 12
+orders; `debit` (3739000) is the gross sum of only 10 of them; the 189800
+difference is `order_LP0003` (89900) + `order_LP0012` (99900) — both
+confirmed against the actual `pass3_payment_order` output before any code was
+changed. Two root causes, both in the matching/journal logic, not the
+assertion.
+
+## Bug 5 — Tier cascade and field-name bugs stranded a real payment (`pass3_payment_order`)
+
+**What broke.** `pay_LP0003` has `order_id: null` and `notes: {}` — by
+design, it should fall back through the tiers to whichever one actually has
+evidence. It matched nothing and raised no exception of its own; only the
+order side surfaced, as `ORPHAN_ORDER order_LP0003`, which is misleading —
+the order isn't orphaned, a real payment for it exists.
+
+**Root causes (three, compounding):**
+
+1. **The tier logic was `if`/`elif`/`else` on field *presence*, not a
+   cascade on match *success*.** `pay_LP0003` carries a `receipt` field
+   (`rcpt_LP0003`), so it entered the Tier 2 branch — and, since that branch
+   is an `elif`, Tier 3 could never run for it at all, regardless of whether
+   Tier 2 actually found anything.
+2. **Tier 2 itself compared the payment's `receipt` against the *order's*
+   `reference` field — which does not exist.** `orders.xlsx` has no
+   `reference` column; the real, populated field on both sides is `receipt`
+   (confirmed: `order_LP0003.receipt == pay_LP0003.receipt ==
+   "rcpt_LP0003"`, an exact match). Tier 2 could not have succeeded for
+   *any* payment, ever, with this schema.
+3. **Tier 3's own two remaining checks were also individually broken:**
+   `paid_at = _as_dt(payment.get("created_at"))` reads a field name real
+   Razorpay payments don't have — they report `captured_at` — so `paid_at`
+   was always `None` and the whole amount+time branch never ran. And the
+   contact-match check reads `customer_email`/`customer_phone` off the
+   **payment**, fields that only ever exist on **orders** in real Razorpay
+   data (confirmed: this fixture's `payments.json` has neither field on any
+   record) — so `email_match`/`phone_match` could never become `True`,
+   making Tier 3 permanently unreachable regardless of bug 1.
+
+A fourth, adjacent bug surfaced while writing a test for the empty-batch
+edge case: `if payments_df.empty or orders_df.empty: return matches,
+exceptions` skipped the function entirely — including the closing loop that
+raises `ORPHAN_ORDER` — whenever payments arrived empty, silently dropping
+every paid order's orphan signal. The same "should be `and`, not `or`"
+mistake Phase 6 fixed twice in `pass1`/`pass2`, now found a third time.
+
+**Fix.** `core/passes/pass3_payment_order.py`: tiers now cascade explicitly
+(`_tier1_order_id` → `_tier2_receipt` → `_tier3_fuzzy_candidates`, each only
+attempted if the previous returned nothing). Tier 2 compares `receipt` to
+`receipt` on both sides. Tier 3 reads `created_at` **or** `captured_at`, and
+only *requires* a contact match when the payment actually carries a contact
+field at all — when it carries neither (the normal case for real data),
+amount + a tight time window is the evidence, still logged at Tier 3's lower
+confidence (`0.7`, never stamped `1.0` — that's the false-confidence bug
+Phase 6 already fixed, and this fix does not reintroduce it elsewhere). A
+payment that still resolves nothing now always raises a new code,
+`UNMATCHED_PAYMENT` (added to `ExceptionCode`, `MONEY_AT_REST_CODES`, and
+`EXCEPTIONS.md`), instead of silently vanishing — the old code only raised
+an exception here if the *payment's own* `status` equaled `"paid"`, a value
+that is order-status vocabulary and can never appear on a payment record.
+The empty-batch guard is now `and`, matching Phase 6's pattern.
+
+**Result on the real fixture:** `pay_LP0003 → order_LP0003`, `method=tier2`,
+`confidence=0.95`. `order_LP0012` remains the sole `ORPHAN_ORDER` — it is a
+genuine orphan, no payment for it exists anywhere in the batch.
+
+**Tests.** `tests/test_pass3_pass4_fixes.py::test_payment_with_no_order_id_links_via_receipt_tier_at_tier2_confidence`,
+`::test_payment_with_no_identifying_fields_falls_back_to_tier3_amount_time_match`,
+`::test_tier3_still_requires_contact_match_when_payment_has_contact_fields`
+(the relaxation is *only* for payments with no contact fields at all — a
+wrong contact value must still block the match),
+`::test_payment_with_no_matched_order_produces_exception_and_zero_journal_lines`
+(the empty-batch/`UNMATCHED_PAYMENT` fix).
+
+## Bug 6 — Phantom revenue for orders with no matched payment (`pass4_journal`)
+
+**What broke.** `order_LP0012` is a genuine orphan — `status: paid`, no
+payment exists, no money ever arrived. `pass4_journal` still generated a
+`Cr Sales` line for its full amount (99900), because it built one journal
+entry per row of `orders_df` — the raw order list — regardless of whether
+any payment had actually matched. The ledger recognized revenue for money
+that does not exist. This is the more serious of the two bugs: it is a
+correctness failure in what the ledger *asserts happened*, not just a
+matching gap.
+
+**Root cause.**
+
+```python
+for _, order in orders_df.iterrows():
+    ...
+    cr_sales = order_amount
+    journal_lines.extend([..., {"account": "Sales", "direction": "Cr", "amount_paisa": cr_sales}, ...])
+```
+
+Iterating the raw order list means every order gets a `Cr Sales` line
+unconditionally, whether or not `pass3` ever matched a payment to it. The
+debit side (`Dr Bank`/`Fee`/`GST`), by contrast, is correctly `0` for an
+orphan (no payment data to sum) — so the credit and debit sides silently
+diverge by exactly the orphan's order amount, which is precisely the
+189800 gap decoded above (89900 for the not-yet-linked `order_LP0003` +
+99900 for the genuinely orphaned `order_LP0012`).
+
+**Fix.** `pass4_journal` now iterates `matches_df["order_id"].unique()` —
+the actual matched payment-order pairs — never `orders_df` directly. An
+order absent from `matches_df` generates zero journal lines; it is carried
+entirely by its `ORPHAN_ORDER` exception. The mirror case (a payment with no
+matched order) is handled by construction: such a payment never appears in
+`matches_df` to begin with, since that frame is built from `pass3`'s
+successful matches, so it likewise contributes no journal lines — it is
+carried by its own `UNMATCHED_PAYMENT` exception (bug 5).
+
+**The unsettled-payment check requested alongside this bug is real too.**
+`pay_LP0011` is captured but appears in no settlement's payment list
+(`EXPECTED.json`'s own intended `UNSETTLED_PAYMENT` case). The old code
+still generated `Dr Bank` for its net amount — debiting a "money has arrived
+in our bank account" account for money that has only been *captured* by the
+gateway, not settled to the merchant. This does not break the balance
+assertion (both sides are still equal; only an account *label* is wrong),
+but it is the same class of error: asserting something happened that
+didn't. `pass4_journal` now accepts `unsettled_order_ids`
+(`api/reconcile.py` computes it from `pass2`'s `UNSETTLED_PAYMENT`
+exceptions, joined back to the order via `pass3`'s matches) and debits
+`"Settlement Receivable"` instead of `"Bank"` for those orders — same
+amount, honest label, ledger still balances either way.
+
+**A scoping note, reported rather than hidden:** on the actual uploaded
+fixture, `pass2` currently cannot identify individual unsettled payments —
+`settlements.json` here batches many payments per settlement as a
+`payment_ids` list (real Razorpay settlement shape), while `pass2` only
+knows how to read a single `settlement_id` per payment row. Verified
+directly: running `pass2` against this fixture flags **all 11** payments as
+`UNSETTLED_PAYMENT`, not just `pay_LP0011`, and both settlements as
+`SETTLEMENT_IMBALANCE`. So today, every order in this batch is (over-)routed
+to `"Settlement Receivable"` rather than `"Bank"` — safe (the ledger still
+balances, and nothing is claimed to be settled that isn't) but not the
+precise per-payment split the fixture intends. `bank_statement.csv` has the
+same class of drift (`credit_paisa`/`debit_paisa`/`value_date` instead of
+`amount_paisa`/`posted_at`/`bank_credit_id`), which is why `pass1` also
+can't identify real bank credits in this fixture. Fixing `pass2`/`pass1` to
+parse these real settlement/bank-statement shapes is separate, additional
+work beyond bugs 5 and 6 — flagged here, not silently patched over.
+
+**Tests.** `tests/test_pass3_pass4_fixes.py::test_orphan_order_produces_exception_and_zero_journal_lines`,
+`::test_journal_balances_across_the_full_fixture_batch` (a 12-order/11-payment/1-refund
+batch shaped like the real one), and
+`::test_property_journal_always_balances_and_every_line_traces_to_a_match`
+(Hypothesis, 100 generated batches per run: `sum(debits) == sum(credits)`
+always, and every journal line's `order_id` is always a subset of the
+actually-matched order IDs).
+
+**Result on the real fixture:** journal balances (11 matched orders, 11
+`Cr Sales` lines, `order_LP0012` contributes none). `debit == credit`,
+verified end-to-end through the same `run_reconciliation()` the API calls,
+not just at the unit level.
