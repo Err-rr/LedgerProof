@@ -73,10 +73,22 @@ def pass2_settlement_payments(
     adjustment_df = adjustments_df.copy() if adjustments_df is not None else pd.DataFrame(columns=["adjustment_id", "settlement_id", "amount_paisa"])
 
     if "settlement_id" not in payments_df.columns:
+        # The link is settlement.payment_ids (a list on the settlement) --
+        # per SCHEMAS.md, a payment record never carries its own
+        # settlement_id. Build the payment_id -> settlement_id mapping from
+        # that list; do not also try an order_id-based mapping, since real
+        # payment/settlement records have no order_id in common to join on
+        # (a settlement batches many payments, not one order).
         payments_df = payments_df.copy()
-        payments_df["settlement_id"] = payments_df.get("order_id").map(
-            {row["order_id"]: row["settlement_id"] for _, row in settlements_df.iterrows()}
-        ) if "order_id" in settlements_df.columns and "order_id" in payments_df.columns else ""
+        payment_to_settlement: dict[str, str] = {}
+        if "payment_ids" in settlements_df.columns:
+            for _, settlement_row in settlements_df.iterrows():
+                settlement_id_value = str(settlement_row.get("settlement_id", ""))
+                payment_ids = settlement_row.get("payment_ids")
+                if isinstance(payment_ids, (list, tuple)):
+                    for payment_id_value in payment_ids:
+                        payment_to_settlement[str(payment_id_value)] = settlement_id_value
+        payments_df["settlement_id"] = payments_df["payment_id"].astype(str).map(payment_to_settlement)
 
     # Match each payment to a settlement whenever a settlement_id is available.
     for _, payment_row in payments_df.iterrows():

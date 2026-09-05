@@ -68,19 +68,30 @@ def _as_datetime(value: Any) -> datetime | None:
     return pd.to_datetime(value).to_pydatetime()
 
 
-def _parse_utr_from_narration(narration: Any) -> str | None:
+def _parse_utr_candidates(narration: Any) -> list[str]:
+    """Every plausible UTR-shaped token in the narration, in the order they
+    appear -- not just the first. A real NEFT narration can read
+    "NEFT-RAZORPAYSOFTWAREPRIV-<UTR>-HDFC": the first >=10-char bare token
+    is the sender's name, not the UTR, and picking only the first one
+    silently matched the wrong (and non-existent) settlement every time.
+    The caller checks each candidate against real settlement UTRs and uses
+    whichever one actually resolves, rather than guessing narration
+    structure -- see pass1_bank_settlement's Phase A.
+    """
     if pd.isna(narration):
-        return None
+        return []
     text = str(narration).strip()
     if not text:
-        return None
-    match = UTR_RE.search(text)
-    if match:
-        return match.group(0).upper()
-    exact = re.search(r"\b[A-Z0-9]{10,}\b", text)
-    if exact:
-        return exact.group(0).upper()
-    return None
+        return []
+    candidates: list[str] = []
+    primary = UTR_RE.search(text)
+    if primary:
+        candidates.append(primary.group(0).upper())
+    for match in re.finditer(r"\b[A-Z0-9]{10,}\b", text):
+        token = match.group(0).upper()
+        if token not in candidates:
+            candidates.append(token)
+    return candidates
 
 
 def _build_exception(code: str, record_type: str, record_id: str, **details: Any) -> dict[str, Any]:
@@ -134,6 +145,17 @@ def pass1_bank_settlement(
         settlement_df["amount_paisa"] = settlement_df["net_amount_paisa"]
     if "amount_paisa" not in bank_df.columns and "net_amount_paisa" in bank_df.columns:
         bank_df["amount_paisa"] = bank_df["net_amount_paisa"]
+    # A real bank statement export (SCHEMAS.md's own credit_paisa/debit_paisa
+    # split, e.g.) never carries amount_paisa/posted_at/bank_credit_id under
+    # those exact names -- without these fallbacks every bank row silently
+    # collapses to amount=0, no timestamp, and the literal id "bank-row" for
+    # every row (so a 3-row statement is treated as one row three times).
+    if "amount_paisa" not in bank_df.columns and "credit_paisa" in bank_df.columns:
+        bank_df["amount_paisa"] = bank_df["credit_paisa"]
+    if "posted_at" not in bank_df.columns and "value_date" in bank_df.columns:
+        bank_df["posted_at"] = bank_df["value_date"]
+    if "bank_credit_id" not in bank_df.columns and "bank_id" not in bank_df.columns and "line_no" in bank_df.columns:
+        bank_df["bank_credit_id"] = "bank-line-" + bank_df["line_no"].astype(str)
 
     all_bank_ids: list[str] = []
     resolved_exceptions: dict[str, dict[str, Any]] = {}
@@ -149,13 +171,27 @@ def pass1_bank_settlement(
         seen_bank_ids.add(bank_id)
 
         narration = bank_row.get("narration")
-        utr_token = _parse_utr_from_narration(narration)
         bank_amount = int(bank_row.get("amount_paisa", 0) or 0)
 
+        # Try each candidate token in narration order, but only ever accept
+        # one that is VERIFIED against a real settlement UTR -- this is what
+        # keeps a coincidental long token (a merchant name, say) from ever
+        # being treated as resolving evidence, without needing to guess at
+        # narration structure to find "the right" token in the first place.
+        # parsed_token is kept separately (for the amount+date fallback's
+        # evidence) precisely so a decoy token that never matched anything
+        # is still shown honestly rather than reported as None -- see
+        # test_fix1_decoy_token_without_real_utr_match_is_labeled_amount_date.
+        narration_candidates = _parse_utr_candidates(narration)
+        parsed_token = narration_candidates[0] if narration_candidates else None
+        utr_token: str | None = None
         utr_settlement_matches = pd.DataFrame()
-        if utr_token:
-            utr_settlement_matches = settlement_df[settlement_df["utr"].astype(str).str.upper() == utr_token.upper()]
-            utr_settlement_matches = utr_settlement_matches.drop_duplicates(subset=["settlement_id"])
+        for candidate in narration_candidates:
+            candidate_matches = settlement_df[settlement_df["utr"].astype(str).str.upper() == candidate]
+            if not candidate_matches.empty:
+                utr_token = candidate
+                utr_settlement_matches = candidate_matches.drop_duplicates(subset=["settlement_id"])
+                break
 
         if not utr_settlement_matches.empty:
             if len(utr_settlement_matches) > 1:
@@ -207,6 +243,7 @@ def pass1_bank_settlement(
         if bank_ts is None:
             resolved_exceptions[bank_id] = _build_exception(
                 "UNMATCHED_BANK_CREDIT", "bank_credit", bank_id, narration=narration, reason="unparseable_posted_at",
+                amount_paisa=bank_amount,
             )
             continue
 
@@ -220,7 +257,9 @@ def pass1_bank_settlement(
                 candidates.append(settlement_row)
 
         if not candidates:
-            resolved_exceptions[bank_id] = _build_exception("UNMATCHED_BANK_CREDIT", "bank_credit", bank_id, narration=narration)
+            resolved_exceptions[bank_id] = _build_exception(
+                "UNMATCHED_BANK_CREDIT", "bank_credit", bank_id, narration=narration, amount_paisa=bank_amount,
+            )
             continue
 
         candidate_df = pd.DataFrame(candidates).drop_duplicates(subset=["settlement_id"])
@@ -243,7 +282,7 @@ def pass1_bank_settlement(
                 "bank_credit_id": bank_id,
                 "settlement_id": settlement_id,
                 "utr": None,
-                "parsed_narration_token": utr_token,
+                "parsed_narration_token": parsed_token,
                 "bank_amount_paisa": bank_amount,
                 "settlement_amount_paisa": int(settlement_row.get("amount_paisa", settlement_row.get("net_amount_paisa", 0)) or 0),
                 "bank_posted_at": bank_row.get("posted_at"),
@@ -282,6 +321,7 @@ def pass1_bank_settlement(
                     winning_bank_credit_id=winner.bank_id,
                     winning_method=winner.method,
                     winning_confidence=winner.confidence,
+                    amount_paisa=loser.evidence.get("bank_amount_paisa", 0),
                 )
         else:
             competing_ids = [c.bank_id for c in winners]
@@ -300,6 +340,7 @@ def pass1_bank_settlement(
                     settlement_id=settlement_id,
                     losing_confidence=loser.confidence,
                     winning_confidence=max_confidence,
+                    amount_paisa=loser.evidence.get("bank_amount_paisa", 0),
                 )
 
     matched_bank_ids = {m.left_id for m in matches}

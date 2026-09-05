@@ -209,6 +209,12 @@ def pass3_payment_order(
 
     for order_id, order_row in orders_by_id.items():
         if str(order_row.get("status", "")).lower() == "paid" and order_id not in order_payment_counts:
-            exceptions.append(_build_exception("ORPHAN_ORDER", "order", order_id, status=str(order_row.get("status"))))
+            exceptions.append(
+                _build_exception(
+                    "ORPHAN_ORDER", "order", order_id,
+                    status=str(order_row.get("status")),
+                    amount_paisa=int(order_row.get("amount_paisa", 0) or 0),
+                )
+            )
 
     return matches, exceptions
