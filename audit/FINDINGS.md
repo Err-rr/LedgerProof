@@ -1,10 +1,19 @@
 # Findings & Fixes
 
-Launch-blocking bugs found in the matching engine and journal generation,
-across two separate exercises: an adversarial mutation audit (Phase 6) and
-the first real, non-synthetic upload (Phase 8). Both are recorded here so
-the full history of what broke, why, and how it was verified fixed stays in
-one place.
+Every bug on this page was caught by our own verification — an adversarial
+mutation harness deliberately attacking the matcher, and the journal's own
+`sum(debits) == sum(credits)` balance assertion (CLAUDE.md rule 7) refusing
+to let a bad run through — not by a user filing a report. We consider a
+confident, wrong match a worse failure than an exception: an exception asks
+a human to look; a wrong match doesn't even ask. That is why this list
+exists and why none of it was fixed quietly.
+
+Two exercises, six bugs: an adversarial mutation audit (Phase 6, four bugs,
+315→330 mutations) and the first real, non-synthetic upload (Phase 8, two
+bugs, caught by the balance assertion on the very first try). Both are
+recorded here in full — root cause, fix, reproduction, and the before/after
+evidence — so the complete history of what broke, why, and how it was
+verified fixed stays in one place.
 
 ## Phase 6 — Adversarial Mutation Audit
 
@@ -72,6 +81,11 @@ path and is honestly labeled `"amount_date"` / `0.95`. The evidence dict on an
 amount+date claim now also carries `parsed_narration_token`, so a reviewer can
 see that a token was present without it being mistaken for a resolving UTR.
 
+**Reproduce.** `python audit/mutate.py --replay false_confidence 100060` — today
+prints `"verdict": "CONTAINED"`, `"result_method": "amount_date"`; before the
+fix this same seed printed `"verdict": "WRONG_MATCH"`, `"result_method": "utr"`,
+`"result_confidence": 1.0`.
+
 **Test.** `tests/test_pass1_pass2_fixes.py::test_fix1_decoy_token_without_real_utr_match_is_labeled_amount_date`
 and `::test_fix1_real_utr_match_still_gets_utr_label_and_full_confidence`.
 
@@ -117,6 +131,11 @@ could permanently lock out a strong UTR match processed later.
   `AMBIGUOUS_MATCH` is emitted for each, per rule 3. Every losing claim is
   reported as `UNMATCHED_BANK_CREDIT (reason=lost_arbitration)`, naming the
   settlement and the winning claim, instead of vanishing.
+
+**Reproduce.** `python audit/mutate.py --replay priority_theft_via_collision 100297`
+— today `"verdict": "CONTAINED"`, the fabricated credit is routed to
+`UNMATCHED_BANK_CREDIT`; before the fix it printed `"verdict": "WRONG_MATCH"`
+with the fabricated credit confidently winning the settlement.
 
 **Test.** `tests/test_pass1_pass2_fixes.py::test_fix2_utr_verified_claim_always_wins_regardless_of_delivery_order`
 runs the same batch as `[thief, legit]`, `[legit, thief]`, reversed, and
@@ -179,6 +198,10 @@ The top-level early return was narrowed to
 `if settlements_df.empty and payments_df.empty:` so a payments batch is never
 discarded just because the settlements side happened to be empty.
 
+**Reproduce.** `python audit/mutate.py --replay delete_payment_mid_batch 100000`
+— today `"verdict": "CONTAINED"`, `SETTLEMENT_IMBALANCE` raised; before the fix
+it printed `"verdict": "WRONG_MATCH"` with no exception at all.
+
 **Test.** `tests/test_pass1_pass2_fixes.py::test_fix3_settlement_with_no_payments_raises_maximal_imbalance`
 (asserts `delta_paisa == -settlement_amount` and
 `rupee_at_risk() == settlement_amount`) and
@@ -230,6 +253,10 @@ primary (UTR) path, which is what "amount" mutations should have been
 attacking all along. A new dedicated mutation,
 `amount/utr_verified_amount_mismatch`, was added specifically for this case:
 an intact, correct UTR paired with a drifted amount.
+
+**Reproduce.** `python audit/mutate.py --replay utr_verified_amount_mismatch 100000`
+— today `"verdict": "CONTAINED"`, routed to `AMOUNT_VARIANCE_UNEXPLAINED`; this
+mutation did not exist before the fix (that was the coverage gap itself).
 
 **Test.** `tests/test_pass1_pass2_fixes.py::test_fix4_utr_match_with_wrong_amount_is_never_silently_accepted`.
 
@@ -336,7 +363,16 @@ The empty-batch guard is now `and`, matching Phase 6's pattern.
 
 **Result on the real fixture:** `pay_LP0003 → order_LP0003`, `method=tier2`,
 `confidence=0.95`. `order_LP0012` remains the sole `ORPHAN_ORDER` — it is a
-genuine orphan, no payment for it exists anywhere in the batch.
+genuine orphan, no payment for it exists anywhere in the batch. Re-verified
+directly against current code while writing this document (not carried over
+from when the fix was made): identical result.
+
+**Reproduce.** The discovery fixture is a one-off hand-authored batch, not
+part of this repo (it is described here, not shipped). The in-repo, runnable
+reproduction is `tests/test_pass3_pass4_fixes.py`, which encodes the same
+shape (a payment with `order_id=None` and no `notes`, resolvable only by a
+`receipt` match) and fails against the pre-fix code, passes against current
+code — `python -m pytest tests/test_pass3_pass4_fixes.py -v`.
 
 **Tests.** `tests/test_pass3_pass4_fixes.py::test_payment_with_no_order_id_links_via_receipt_tier_at_tier2_confidence`,
 `::test_payment_with_no_identifying_fields_falls_back_to_tier3_amount_time_match`,
